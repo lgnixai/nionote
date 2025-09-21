@@ -1,4 +1,4 @@
-import ObsidianLayout from '../components/ObsidianLayout';
+import ObsidianLayout from '../components/layout/ObsidianLayout';
 
 const Index = () => {
   return <ObsidianLayout />;

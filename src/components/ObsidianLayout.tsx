@@ -2,13 +2,17 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { TabBar, type TabType } from './Tab';
 import Editor from './Editor';
-import FileTree, { type FileItem } from './FileTree';
+import FileTree from './FileTree';
 import MarkdownEditor from './MarkdownEditor';
 import DatabaseEditor from './DatabaseEditor';
 import CanvasEditor from './CanvasEditor';
 import HtmlEditor from './HtmlEditor';
 import CodeEditor from './CodeEditor';
 import CommandPalette from './CommandPalette';
+import { useFileSystemStore } from '@/core/state/FileSystemStore';
+import { useEditorStore } from '@/core/state/EditorStore';
+import { useWebSocket } from '@/hooks/useWebSocket';
+import { FileItem } from '@/core/events/events';
 
 interface PanelNode {
   id: string;
@@ -26,61 +30,32 @@ interface ExtendedTabType extends TabType {
 }
 
 const ObsidianLayout: React.FC = () => {
-  const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
-  const [files, setFiles] = useState<Record<string, FileItem>>({});
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [recentFiles, setRecentFiles] = useState<string[]>([]);
   
-  const [panelTree, setPanelTree] = useState<PanelNode>({
-    id: 'root',
-    type: 'split',
-    direction: 'horizontal',
-    children: [
-      {
-        id: 'sidebar',
-        type: 'leaf',
-        tabs: [],
-        size: 25,
-        minSize: 15
-      },
-      {
-        id: 'main-area',
-        type: 'split',
-        direction: 'vertical',
-        size: 75,
-        children: [
-          {
-            id: 'editor',
-            type: 'leaf',
-            tabs: [{ id: 'welcome', title: '欢迎', isActive: true }],
-            size: 100,
-            minSize: 20
-          }
-        ]
-      }
-    ]
-  });
+  // 状态管理
+  const { selectedFileId, files, getFileById, updateFileContent } = useFileSystemStore();
+  const { 
+    panelTree, 
+    activePanelId, 
+    recentTabs, 
+    addTab, 
+    removeTab, 
+    activateTab, 
+    updateTab, 
+    moveTab, 
+    duplicateTab, 
+    splitPanel, 
+    closePanel,
+    loadFromStorage: loadEditorState 
+  } = useEditorStore();
+  
+  // WebSocket连接
+  const webSocket = useWebSocket({ autoConnect: true });
 
-  // Load recent files from localStorage
+  // 初始化编辑器状态
   useEffect(() => {
-    const savedRecentFiles = localStorage.getItem('obsidian-recent-files');
-    if (savedRecentFiles) {
-      setRecentFiles(JSON.parse(savedRecentFiles));
-    }
-  }, []);
-
-  // Save recent files to localStorage
-  useEffect(() => {
-    localStorage.setItem('obsidian-recent-files', JSON.stringify(recentFiles));
-  }, [recentFiles]);
-
-  // Add file to recent list
-  const addToRecentFiles = useCallback((fileId: string) => {
-    setRecentFiles(prev => {
-      const filtered = prev.filter(id => id !== fileId);
-      return [fileId, ...filtered].slice(0, 10);
-    });
-  }, []);
+    loadEditorState();
+  }, [loadEditorState]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -108,62 +83,21 @@ const ObsidianLayout: React.FC = () => {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Save file content to localStorage
-  const saveFileContent = useCallback((file: FileItem, content: string) => {
-    const savedFiles = localStorage.getItem('obsidian-files');
-    if (savedFiles) {
-      const parsedFiles = JSON.parse(savedFiles);
-      parsedFiles[file.id] = { ...parsedFiles[file.id], content };
-      localStorage.setItem('obsidian-files', JSON.stringify(parsedFiles));
-      setFiles(parsedFiles);
-    }
-  }, []);
-
-  // Handle file selection from FileTree
+  // 处理文件选择
   const handleFileSelect = useCallback((file: FileItem) => {
-    setSelectedFile(file);
-    addToRecentFiles(file.id);
+    // 在主编辑器面板中添加或激活标签
+    const mainEditorPanelId = 'main-editor'; // 假设主编辑器面板ID
     
-    // Find the main editor panel and add/activate tab
-    const updatePanelWithFile = (node: PanelNode): PanelNode => {
-      if (node.id === 'editor' && node.type === 'leaf') {
-        const existingTabIndex = node.tabs?.findIndex(tab => 
-          (tab as ExtendedTabType).fileId === file.id
-        );
-        
-        if (existingTabIndex !== undefined && existingTabIndex >= 0) {
-          // Activate existing tab
-          const newTabs = node.tabs?.map((tab, index) => ({
-            ...tab,
-            isActive: index === existingTabIndex
-          })) || [];
-          return { ...node, tabs: newTabs };
-        } else {
-          // Add new tab
-          const newTab: ExtendedTabType = {
-            id: `file-${file.id}`,
-            title: file.name,
-            isActive: true,
-            fileId: file.id,
-            content: file.content
-          };
-          const newTabs = [
-            ...(node.tabs?.map(tab => ({ ...tab, isActive: false })) || []),
-            newTab
-          ];
-          return { ...node, tabs: newTabs };
-        }
-      }
-      
-      if (node.children) {
-        return { ...node, children: node.children.map(updatePanelWithFile) };
-      }
-      
-      return node;
+    const newTab = {
+      id: `file-${file.id}`,
+      title: file.name,
+      isActive: true,
+      fileId: file.id,
+      content: file.content,
     };
     
-    setPanelTree(prevTree => updatePanelWithFile(prevTree));
-  }, []);
+    addTab(mainEditorPanelId, newTab);
+  }, [addTab]);
 
   const findPanelById = useCallback((tree: PanelNode, id: string): PanelNode | null => {
     if (tree.id === id) return tree;
