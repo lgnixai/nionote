@@ -9,6 +9,9 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
+import type { FsNode } from '@/api/fs';
+import { getTree, createFile as apiCreateFile, createFolder as apiCreateFolder, movePath as apiMovePath } from '@/api/fs';
+import { connectWS, addFsListener } from '@/lib/ws';
 
 export interface FileItem {
   id: string;
@@ -25,13 +28,65 @@ export interface FileItem {
 interface FileTreeProps {
   onFileSelect?: (file: FileItem) => void;
   selectedFileId?: string;
+  onTreeChange?: (files: Record<string, FileItem>) => void;
 }
 
-const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, selectedFileId }) => {
+const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, selectedFileId, onTreeChange }) => {
   const [files, setFiles] = useState<Record<string, FileItem>>({});
   const [rootItems, setRootItems] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newItemName, setNewItemName] = useState('');
+
+  const toId = useCallback((p: string) => p, []);
+
+  const buildFromFs = useCallback((node: FsNode): { map: Record<string, FileItem>; roots: string[] } => {
+    const map: Record<string, FileItem> = {};
+    const roots: string[] = [];
+
+    const walk = (n: FsNode, parentId?: string, depth: number = 0) => {
+      if (n.type === 'folder' && n.children) {
+        // Skip adding synthetic root node as an item; add children as roots
+        if (n.path === '/' && !parentId) {
+          n.children.forEach(child => walk(child, undefined, depth + 1));
+          return;
+        }
+      }
+
+      const id = toId(n.path);
+      const item: FileItem = {
+        id,
+        name: n.name,
+        type: n.type as 'file' | 'folder',
+        fileType: n.fileType as any,
+        path: n.path,
+        parentId,
+        children: n.type === 'folder' ? [] : undefined,
+        isExpanded: n.type === 'folder' ? (n.path === '/' ? true : false) : undefined,
+      };
+      map[id] = item;
+      if (!parentId) {
+        roots.push(id);
+      } else if (parentId) {
+        const parent = map[parentId];
+        if (parent && parent.children) parent.children.push(id);
+      }
+
+      if (n.children && n.children.length > 0) {
+        n.children.forEach(child => walk(child, id, depth + 1));
+      }
+    };
+
+    walk(node);
+    return { map, roots };
+  }, [toId]);
+
+  const loadTree = useCallback(async () => {
+    const data = await getTree('/');
+    const { map, roots } = buildFromFs(data);
+    setFiles(map);
+    setRootItems(roots);
+    onTreeChange?.(map);
+  }, [buildFromFs, onTreeChange]);
 
   // 获取文件类型标签
   const getFileTypeLabel = (fileType?: string) => {
@@ -44,105 +99,21 @@ const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, selectedFileId }) => 
     }
   };
 
-  // Load data from localStorage on component mount
+  // Load from backend & subscribe to realtime updates
   useEffect(() => {
-    const savedFiles = localStorage.getItem('obsidian-files');
-    const savedRootItems = localStorage.getItem('obsidian-root-items');
-    
-    if (savedFiles && savedRootItems) {
-      setFiles(JSON.parse(savedFiles));
-      setRootItems(JSON.parse(savedRootItems));
-    } else {
-      // Initialize with default structure
-      const defaultFiles: Record<string, FileItem> = {
-        '1': {
-          id: '1',
-          name: '未命名',
-          type: 'folder',
-          path: '/未命名',
-          children: ['2', '3', '4'],
-          isExpanded: true
-        },
-        '2': {
-          id: '2',
-          name: '电池连接线企业调研笔记.md',
-          type: 'file',
-          fileType: 'markdown',
-          path: '/未命名/电池连接线企业调研笔记.md',
-          parentId: '1',
-          content: '# 电池连接线企业调研笔记\n\n## 调研内容\n\n这里是调研的详细内容...'
-        },
-        '3': {
-          id: '3',
-          name: '电池新闻源',
-          type: 'folder',
-          path: '/未命名/电池新闻源',
-          parentId: '1',
-          children: [],
-          isExpanded: false
-        },
-        '4': {
-          id: '4',
-          name: '国内电池连接器企业.md',
-          type: 'file',
-          fileType: 'markdown',
-          path: '/未命名/国内电池连接器企业.md',
-          parentId: '1',
-          content: '# 国内电池连接器企业\n\n## 企业列表\n\n1. 企业A\n2. 企业B\n3. 企业C'
-        },
-        '5': {
-          id: '5',
-          name: '未命名 1',
-          type: 'folder',
-          path: '/未命名 1',
-          children: ['6'],
-          isExpanded: true
-        },
-        '6': {
-          id: '6',
-          name: '未命名',
-          type: 'folder',
-          path: '/未命名 1/未命名',
-          parentId: '5',
-          children: ['7', '8'],
-          isExpanded: true
-        },
-        '7': {
-          id: '7',
-          name: '未命名.md',
-          type: 'file',
-          fileType: 'markdown',
-          path: '/未命名 1/未命名/未命名.md',
-          parentId: '6',
-          content: '# 未命名\n\n现有架构痛点分析\n\n当前问题\n\n• 性能问题: 动态导入过多，启动速度受影响\n• 复杂依赖: tsyringe 依赖注入增加了学习成本\n• 状态管理: immer 和自定义状态管理可能不是最优解\n• 扩展机制: 扩展系统相对复杂，学习曲线陡峭\n• 构建系统: 构建流程有优化空间'
-        },
-        '8': {
-          id: '8',
-          name: '未命名 1.md',
-          type: 'file',
-          fileType: 'markdown',
-          path: '/未命名 1/未命名/未命名 1.md',
-          parentId: '6',
-          content: '# 未命名 1\n\n这是另一个markdown文件的内容。'
-        }
-      };
-      
-      setFiles(defaultFiles);
-      setRootItems(['1', '5']);
-      
-      // Save to localStorage
-      localStorage.setItem('obsidian-files', JSON.stringify(defaultFiles));
-      localStorage.setItem('obsidian-root-items', JSON.stringify(['1', '5']));
-    }
-  }, []);
+    loadTree().catch(() => {});
+    connectWS();
+    const off = addFsListener(() => {
+      // lightweight refresh on any fs event
+      loadTree().catch(() => {});
+    });
+    return () => off();
+  }, [loadTree]);
 
-  // Save to localStorage whenever files or rootItems change
+  // Notify parent on tree changes
   useEffect(() => {
-    if (Object.keys(files).length > 0) {
-      localStorage.setItem('obsidian-files', JSON.stringify(files));
-      localStorage.setItem('obsidian-root-items', JSON.stringify(rootItems));
-    }
-  }, [files, rootItems]);
+    onTreeChange?.(files);
+  }, [files, onTreeChange]);
 
   const toggleExpand = useCallback((id: string) => {
     setFiles(prev => ({
@@ -151,94 +122,44 @@ const FileTree: React.FC<FileTreeProps> = ({ onFileSelect, selectedFileId }) => 
     }));
   }, []);
 
-  const createNewItem = useCallback((parentId: string | null, type: 'file' | 'folder', fileType?: 'markdown' | 'database' | 'canvas' | 'html' | 'code') => {
-    const newId = Date.now().toString();
+  const createNewItem = useCallback(async (parentId: string | null, type: 'file' | 'folder', fileType?: 'markdown' | 'database' | 'canvas' | 'html' | 'code') => {
     const parentPath = parentId ? files[parentId].path : '';
-    
-    let defaultName = '新文件夹';
+    let defaultName = type === 'folder' ? '新文件夹' : '新文件.md';
     let defaultContent = '';
-    
     if (type === 'file') {
       switch (fileType) {
-        case 'markdown':
-          defaultName = '新文档.md';
-          defaultContent = '# 新文档\n\n在这里开始编写...';
-          break;
-        case 'database':
-          defaultName = '新数据库.db';
-          defaultContent = JSON.stringify({ columns: ['ID', '名称', '类型'], rows: [] }, null, 2);
-          break;
-        case 'canvas':
-          defaultName = '新画板.canvas';
-          defaultContent = '';
-          break;
-        case 'html':
-          defaultName = '新页面.html';
-          defaultContent = '<!DOCTYPE html>\n<html>\n<head>\n    <title>Document</title>\n</head>\n<body>\n    <h1>Hello World!</h1>\n</body>\n</html>';
-          break;
-        case 'code':
-          defaultName = '新代码.js';
-          defaultContent = '// JavaScript 代码\nconsole.log("Hello World!");';
-          break;
-        default:
-          defaultName = '新文件.md';
-          defaultContent = '# 新文件\n\n在这里开始编写...';
-          fileType = 'markdown';
+        case 'markdown': defaultName = '新文档.md'; defaultContent = '# 新文档\n\n在这里开始编写...'; break;
+        case 'database': defaultName = '新数据库.db'; defaultContent = JSON.stringify({ columns: ['ID', '名称', '类型'], rows: [] }, null, 2); break;
+        case 'canvas': defaultName = '新画板.canvas'; break;
+        case 'html': defaultName = '新页面.html'; defaultContent = '<!DOCTYPE html>\n<html>\n<head>\n    <title>Document</title>\n</head>\n<body>\n    <h1>Hello World!</h1>\n</body>\n</html>'; break;
+        case 'code': defaultName = '新代码.js'; defaultContent = '// JavaScript 代码\nconsole.log("Hello World!");'; break;
+        default: defaultName = '新文件.md'; defaultContent = '# 新文件\n\n在这里开始编写...'; fileType = 'markdown';
       }
     }
-    
-    const newItem: FileItem = {
-      id: newId,
-      name: defaultName,
-      type,
-      fileType: type === 'file' ? fileType : undefined,
-      path: `${parentPath}/${defaultName}`,
-      parentId: parentId || undefined,
-      children: type === 'folder' ? [] : undefined,
-      isExpanded: type === 'folder' ? true : undefined,
-      content: defaultContent || undefined
-    };
-
-    setFiles(prev => {
-      const updated = { ...prev, [newId]: newItem };
-      
-      if (parentId) {
-        // 确保父文件夹保持展开状态
-        updated[parentId] = {
-          ...updated[parentId],
-          children: [...(updated[parentId].children || []), newId],
-          isExpanded: true
-        };
-      }
-      
-      return updated;
-    });
-
-    if (!parentId) {
-      setRootItems(prev => [...prev, newId]);
+    const newPath = `${parentPath}/${defaultName}`.replace(/\/\/+/g, '/');
+    if (type === 'folder') {
+      await apiCreateFolder(newPath);
+    } else {
+      await apiCreateFile(newPath, defaultContent);
     }
-
-    setEditingId(newId);
+    await loadTree();
+    setEditingId(toId(newPath));
     setNewItemName(defaultName);
-  }, [files]);
+  }, [files, loadTree, toId]);
 
-  const handleRename = useCallback((id: string, newName: string) => {
-    if (!newName.trim()) return;
-    
-    setFiles(prev => {
-      const item = prev[id];
-      const parentPath = item.parentId ? files[item.parentId].path : '';
-      const newPath = `${parentPath}/${newName}`;
-      
-      return {
-        ...prev,
-        [id]: { ...item, name: newName, path: newPath }
-      };
-    });
-    
+  const handleRename = useCallback(async (id: string, newName: string) => {
+    if (!newName.trim()) { setEditingId(null); setNewItemName(''); return; }
+    const item = files[id];
+    if (!item) return;
+    const parentPath = item.parentId ? files[item.parentId!].path : '';
+    const newPath = `${parentPath}/${newName}`.replace(/\/\/+/g, '/');
+    if (newPath !== item.path) {
+      await apiMovePath(item.path, newPath);
+      await loadTree();
+    }
     setEditingId(null);
     setNewItemName('');
-  }, [files]);
+  }, [files, loadTree]);
 
   const handleFileClick = useCallback((file: FileItem) => {
     if (file.type === 'file' && onFileSelect) {

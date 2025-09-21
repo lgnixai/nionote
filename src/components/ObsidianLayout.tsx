@@ -3,6 +3,8 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { TabBar, type TabType } from './Tab';
 import Editor from './Editor';
 import FileTree, { type FileItem } from './FileTree';
+import { getFile, writeFile, createFile as apiCreateFile } from '@/api/fs';
+import { connectWS } from '@/lib/ws';
 import MarkdownEditor from './MarkdownEditor';
 import DatabaseEditor from './DatabaseEditor';
 import CanvasEditor from './CanvasEditor';
@@ -108,19 +110,21 @@ const ObsidianLayout: React.FC = () => {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Save file content to localStorage
-  const saveFileContent = useCallback((file: FileItem, content: string) => {
-    const savedFiles = localStorage.getItem('obsidian-files');
-    if (savedFiles) {
-      const parsedFiles = JSON.parse(savedFiles);
-      parsedFiles[file.id] = { ...parsedFiles[file.id], content };
-      localStorage.setItem('obsidian-files', JSON.stringify(parsedFiles));
-      setFiles(parsedFiles);
-    }
+  // Save file content via backend
+  const saveFileContent = useCallback(async (file: FileItem, content: string) => {
+    await writeFile(file.path, content);
+    setFiles(prev => ({ ...prev, [file.id]: { ...file, content } }));
   }, []);
 
   // Handle file selection from FileTree
-  const handleFileSelect = useCallback((file: FileItem) => {
+  const handleFileSelect = useCallback(async (file: FileItem) => {
+    // ensure we have latest content from backend
+    try {
+      if (file.type === 'file') {
+        const res = await getFile(file.path);
+        file = { ...file, content: res.content } as FileItem;
+      }
+    } catch {}
     setSelectedFile(file);
     addToRecentFiles(file.id);
     
@@ -145,7 +149,8 @@ const ObsidianLayout: React.FC = () => {
             title: file.name,
             isActive: true,
             fileId: file.id,
-            content: file.content
+            content: file.content,
+            filePath: file.path
           };
           const newTabs = [
             ...(node.tabs?.map(tab => ({ ...tab, isActive: false })) || []),
@@ -163,7 +168,7 @@ const ObsidianLayout: React.FC = () => {
     };
     
     setPanelTree(prevTree => updatePanelWithFile(prevTree));
-  }, []);
+  }, [addToRecentFiles]);
 
   const findPanelById = useCallback((tree: PanelNode, id: string): PanelNode | null => {
     if (tree.id === id) return tree;
@@ -402,60 +407,23 @@ const ObsidianLayout: React.FC = () => {
     updatePanelTabs(panelId, [newTab]);
   }, [updatePanelTabs]);
 
-  // Create new file from command palette
-  const handleCreateFileFromPalette = useCallback((type: 'markdown' | 'database' | 'canvas' | 'html' | 'code') => {
-    const newId = Date.now().toString();
-    let defaultName = '新文件';
+  // Create new file from command palette via backend
+  const handleCreateFileFromPalette = useCallback(async (type: 'markdown' | 'database' | 'canvas' | 'html' | 'code') => {
+    let defaultName = '新文件.md';
     let defaultContent = '';
-    
     switch (type) {
-      case 'markdown':
-        defaultName = '新文档.md';
-        defaultContent = '# 新文档\n\n在这里开始编写...';
-        break;
-      case 'database':
-        defaultName = '新数据库.db';
-        defaultContent = JSON.stringify({ columns: ['ID', '名称', '类型'], rows: [] }, null, 2);
-        break;
-      case 'canvas':
-        defaultName = '新画板.canvas';
-        defaultContent = '';
-        break;
-      case 'html':
-        defaultName = '新页面.html';
-        defaultContent = '<!DOCTYPE html>\n<html>\n<head>\n    <title>Document</title>\n</head>\n<body>\n    <h1>Hello World!</h1>\n</body>\n</html>';
-        break;
-      case 'code':
-        defaultName = '新代码.js';
-        defaultContent = '// JavaScript 代码\nconsole.log("Hello World!");';
-        break;
+      case 'markdown': defaultName = '新文档.md'; defaultContent = '# 新文档\n\n在这里开始编写...'; break;
+      case 'database': defaultName = '新数据库.db'; defaultContent = JSON.stringify({ columns: ['ID', '名称', '类型'], rows: [] }, null, 2); break;
+      case 'canvas': defaultName = '新画板.canvas'; break;
+      case 'html': defaultName = '新页面.html'; defaultContent = '<!DOCTYPE html>\n<html>\n<head>\n    <title>Document</title>\n</head>\n<body>\n    <h1>Hello World!</h1>\n</body>\n</html>'; break;
+      case 'code': defaultName = '新代码.js'; defaultContent = '// JavaScript 代码\nconsole.log("Hello World!");'; break;
     }
-
-    const newFile: FileItem = {
-      id: newId,
-      name: defaultName,
-      type: 'file',
-      fileType: type,
-      path: `/${defaultName}`,
-      content: defaultContent
-    };
-
-    // 更新文件列表
-    setFiles(prev => ({
-      ...prev,
-      [newId]: newFile
-    }));
-
-    // 自动打开新文件
+    const newPath = `/${defaultName}`;
+    await apiCreateFile(newPath, defaultContent);
+    const newId = newPath;
+    const newFile: FileItem = { id: newId, name: defaultName, type: 'file', fileType: type, path: newPath, content: defaultContent };
+    setFiles(prev => ({ ...prev, [newId]: newFile }));
     handleFileSelect(newFile);
-    
-    // 保存到localStorage
-    const savedFiles = localStorage.getItem('obsidian-files');
-    if (savedFiles) {
-      const parsedFiles = JSON.parse(savedFiles);
-      parsedFiles[newId] = newFile;
-      localStorage.setItem('obsidian-files', JSON.stringify(parsedFiles));
-    }
   }, [handleFileSelect]);
 
   // Get current active tab for closing
@@ -503,6 +471,7 @@ const ObsidianLayout: React.FC = () => {
           <FileTree 
             onFileSelect={handleFileSelect}
             selectedFileId={selectedFile?.id}
+            onTreeChange={(map) => setFiles(map)}
           />
         );
       }
